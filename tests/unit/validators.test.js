@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { LoginSchema } from '../../src/interface/http/validators/authValidators.js';
 import { ProductIdSchema, SearchQuerySchema, PurchaseSchema } from '../../src/interface/http/validators/productValidators.js';
 
@@ -84,5 +85,23 @@ describe('PurchaseSchema', () => {
             mail: 'test@example.com'
         });
         expect(result.success).toBe(false);
+    });
+
+    it('should handle ReDoS attack payload without hanging', () => {
+        // Input que congela el regex vulnerable en ~2.7 segundos.
+        // Zod debe rechazarlo en < 50ms.
+        const start = performance.now();
+        const result = PurchaseSchema.safeParse({
+            mail: 'a'.repeat(33) + '!',
+            address: '123 Main St',
+            ship_date: '2025-01-01',
+            phone: '555-1234',
+            price: '99€',
+            product_id: '1',
+            product_name: 'Test Product'
+        });
+        const elapsed = performance.now() - start;
+        expect(result.success).toBe(false);
+        expect(elapsed).toBeLessThan(50);
     });
 });

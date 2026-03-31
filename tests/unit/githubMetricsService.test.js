@@ -31,6 +31,7 @@ const { default: GitHubMetricsService } = await import(
 describe('GitHubMetricsService', () => {
   beforeEach(() => {
     mockFetch.mockReset();
+    GitHubMetricsService.clearCache();
   });
 
   describe('_median', () => {
@@ -252,15 +253,19 @@ describe('GitHubMetricsService', () => {
         id: 1, sha: 'abc123', created_at: now.toISOString()
       }];
 
-      // 4 deployment fetches (one per metric via Promise.all)
-      for (let i = 0; i < 4; i++) {
-        mockFetch.mockResolvedValueOnce({
-          ok: true,
-          json: async () => deployments
-        });
-      }
+      // 1 deployment fetch compartido (antes eran 4 independientes)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => deployments
+      });
 
-      // Lead time - commit fetch
+      // _prefetchStatuses: 1 status fetch para el unico deployment
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ state: 'success', created_at: now.toISOString() }]
+      });
+
+      // Lead time - commit fetch (batch paralelo, 1 deployment)
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -269,17 +274,7 @@ describe('GitHubMetricsService', () => {
         })
       });
 
-      // Change failure rate - status fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ state: 'success', created_at: now.toISOString() }]
-      });
-
-      // MTTR - status fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ state: 'success', created_at: now.toISOString() }]
-      });
+      // Change failure rate y MTTR leen statuses del cache — sin fetch adicional
 
       const result = await GitHubMetricsService.getAllMetrics(90);
 
@@ -290,6 +285,30 @@ describe('GitHubMetricsService', () => {
       expect(result.metrics.changeFailureRate).toBeDefined();
       expect(result.metrics.mttr).toBeDefined();
       expect(result.generatedAt).toBeDefined();
+    });
+
+    it('should use cache on second call (no additional fetch)', async () => {
+      const now = new Date();
+      const deployments = [{ id: 1, sha: 'abc', created_at: now.toISOString() }];
+
+      // Primera llamada: 1 deployment + 1 status + 1 commit
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => deployments })
+        .mockResolvedValueOnce({ ok: true, json: async () => [{ state: 'success', created_at: now.toISOString() }] })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ sha: 'abc', commit: { author: { date: now.toISOString() } } }) });
+
+      await GitHubMetricsService.getAllMetrics(90);
+      const callsAfterFirst = mockFetch.mock.calls.length;
+
+      // Segunda llamada: deployments y statuses vienen del cache
+      // Solo se espera el commit fetch (lead time, no cacheable)
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ sha: 'abc', commit: { author: { date: now.toISOString() } } }) });
+
+      await GitHubMetricsService.getAllMetrics(90);
+      const newCalls = mockFetch.mock.calls.length - callsAfterFirst;
+
+      // Solo 1 nuevo fetch (commit), no re-fetch de deployments ni statuses
+      expect(newCalls).toBe(1);
     });
   });
 

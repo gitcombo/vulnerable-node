@@ -8,6 +8,24 @@ class GitHubMetricsService {
     this.token = config.github.token;
     this.environment = config.github.environment;
     this.baseUrl = `https://api.github.com/repos/${this.owner}/${this.repo}`;
+
+    // In-memory cache para reducir llamadas redundantes a la GitHub API.
+    // _deployments: resultado crudo del endpoint (sin filtrar por days).
+    // _statuses: Map<deploymentId, statuses[]> evita re-fetch en N+1.
+    // TTL de 5 minutos — suficiente para el dashboard DORA sin datos obsoletos.
+    this._cache = {
+      deployments: null,
+      deploymentsFetchedAt: 0,
+      statuses: new Map(),
+    };
+    this._cacheTTL = 5 * 60 * 1000; // 5 minutos
+  }
+
+  /** Invalida el cache completamente (util en tests). */
+  clearCache() {
+    this._cache.deployments = null;
+    this._cache.deploymentsFetchedAt = 0;
+    this._cache.statuses.clear();
   }
 
   _headers() {
@@ -34,24 +52,61 @@ class GitHubMetricsService {
     return response.json();
   }
 
+  /**
+   * Obtiene deployments del periodo con cache TTL.
+   * Una sola llamada HTTP se comparte entre todos los metodos DORA.
+   */
   async _getDeployments(days = 90) {
+    const now = Date.now();
+    const cacheStale = (now - this._cache.deploymentsFetchedAt) > this._cacheTTL;
+
+    if (!this._cache.deployments || cacheStale) {
+      const raw = await this._fetch(
+        `/deployments?environment=${encodeURIComponent(this.environment)}&per_page=100`
+      );
+      this._cache.deployments = raw;
+      this._cache.deploymentsFetchedAt = now;
+    }
+
     const since = new Date();
     since.setDate(since.getDate() - days);
-
-    // GitHub API returns newest first, get up to 100
-    const deployments = await this._fetch(
-      `/deployments?environment=${encodeURIComponent(this.environment)}&per_page=100`
-    );
-
-    return deployments.filter(d => new Date(d.created_at) >= since);
+    return this._cache.deployments.filter(d => new Date(d.created_at) >= since);
   }
 
+  /**
+   * Obtiene statuses de un deployment con cache por ID.
+   * Evita el patron N+1 cuando multiples metodos consultan el mismo deployment.
+   */
   async _getDeploymentStatuses(deploymentId) {
-    return this._fetch(`/deployments/${deploymentId}/statuses?per_page=10`);
+    if (this._cache.statuses.has(deploymentId)) {
+      return this._cache.statuses.get(deploymentId);
+    }
+    const statuses = await this._fetch(`/deployments/${deploymentId}/statuses?per_page=10`);
+    this._cache.statuses.set(deploymentId, statuses);
+    return statuses;
   }
 
   async _getCommit(sha) {
     return this._fetch(`/commits/${sha}`);
+  }
+
+  /**
+   * Pre-carga en paralelo los statuses de todos los deployments dados.
+   * Usa lotes de `concurrency` para respetar rate limits de GitHub API.
+   * Los resultados quedan en this._cache.statuses para uso posterior sin re-fetch.
+   */
+  async _prefetchStatuses(deployments, concurrency = 10) {
+    const ids = deployments.map(d => d.id).filter(id => !this._cache.statuses.has(id));
+    for (let i = 0; i < ids.length; i += concurrency) {
+      const batch = ids.slice(i, i + concurrency);
+      await Promise.all(
+        batch.map(id =>
+          this._getDeploymentStatuses(id).catch(() => {
+            // Error individual no debe interrumpir el lote
+          })
+        )
+      );
+    }
   }
 
   /**
@@ -87,28 +142,35 @@ class GitHubMetricsService {
   }
 
   /**
-   * Lead Time for Changes: Time from commit to production deployment
+   * Lead Time for Changes: Time from commit to production deployment.
+   * Usa Promise.all en lotes para obtener commits en paralelo en vez de
+   * un for-await secuencial que genera N llamadas HTTP bloqueantes.
    * Elite: < 1 hour | High: < 1 day | Medium: < 1 week | Low: > 1 week
    */
   async getLeadTimeForChanges(days = 90) {
     const deployments = await this._getDeployments(days);
-    // Sample max 50 deployments for rate limit awareness
     const sampled = deployments.slice(0, 50);
 
+    // Fetch commits en paralelo (lotes de 10) en vez de secuencial
+    const concurrency = 10;
     const leadTimes = [];
 
-    for (const deployment of sampled) {
-      try {
-        const commit = await this._getCommit(deployment.sha);
-        const commitDate = new Date(commit.commit.author.date);
-        const deployDate = new Date(deployment.created_at);
-        const leadTimeHours = (deployDate - commitDate) / (1000 * 60 * 60);
-        if (leadTimeHours >= 0) {
-          leadTimes.push(leadTimeHours);
-        }
-      } catch {
-        // Skip deployments where commit info is unavailable
-      }
+    for (let i = 0; i < sampled.length; i += concurrency) {
+      const batch = sampled.slice(i, i + concurrency);
+      const results = await Promise.all(
+        batch.map(async deployment => {
+          try {
+            const commit = await this._getCommit(deployment.sha);
+            const commitDate = new Date(commit.commit.author.date);
+            const deployDate = new Date(deployment.created_at);
+            const leadTimeHours = (deployDate - commitDate) / (1000 * 60 * 60);
+            return leadTimeHours >= 0 ? leadTimeHours : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      results.forEach(lt => { if (lt !== null) leadTimes.push(lt); });
     }
 
     const medianHours = this._median(leadTimes);
@@ -135,18 +197,18 @@ class GitHubMetricsService {
   }
 
   /**
-   * Change Failure Rate: % of deployments that cause failures
+   * Change Failure Rate: % of deployments that cause failures.
+   * Los statuses ya fueron pre-cargados por getAllMetrics() — sin N+1.
    * Elite: < 5% | High: < 10% | Medium: < 15% | Low: > 15%
    */
   async getChangeFailureRate(days = 90) {
     const deployments = await this._getDeployments(days);
     let failures = 0;
-    let total = deployments.length;
+    const total = deployments.length;
 
     for (const deployment of deployments) {
       try {
         const statuses = await this._getDeploymentStatuses(deployment.id);
-        // Most recent status is first
         if (statuses.length > 0 && statuses[0].state === 'failure') {
           failures++;
         }
@@ -180,7 +242,8 @@ class GitHubMetricsService {
   }
 
   /**
-   * Mean Time to Recovery: How long to restore service after failure
+   * Mean Time to Recovery: How long to restore service after failure.
+   * Los statuses ya fueron pre-cargados por getAllMetrics() — sin N+1.
    * Elite: < 1 hour | High: < 1 day | Medium: < 1 week | Low: > 1 week
    */
   async getMTTR(days = 90) {
@@ -192,7 +255,6 @@ class GitHubMetricsService {
         const statuses = await this._getDeploymentStatuses(deployments[i].id);
         if (statuses.length === 0) continue;
 
-        // Check if this deployment had a failure then recovery
         const hasFailure = statuses.some(s => s.state === 'failure');
         const hasSuccess = statuses.some(s => s.state === 'success');
 
@@ -206,9 +268,10 @@ class GitHubMetricsService {
           const hours = Math.abs(recoveryTime - failureTime) / (1000 * 60 * 60);
           recoveryTimes.push(hours);
         } else if (hasFailure && !hasSuccess) {
-          // Look for next successful deployment as recovery
           for (let j = i - 1; j >= 0; j--) {
             try {
+              // Los statuses del deployment j ya estan en cache si getAllMetrics
+              // llamo _prefetchStatuses antes — cero HTTP adicionales aqui.
               const nextStatuses = await this._getDeploymentStatuses(deployments[j].id);
               if (nextStatuses.length > 0 && nextStatuses[0].state === 'success') {
                 const failureTime = new Date(deployments[i].created_at);
@@ -233,7 +296,7 @@ class GitHubMetricsService {
 
     let rating;
     if (recoveryTimes.length === 0) {
-      rating = 'Elite'; // No failures = best case
+      rating = 'Elite';
     } else if (medianHours < 1) {
       rating = 'Elite';
     } else if (medianHours < 24) {
@@ -255,9 +318,20 @@ class GitHubMetricsService {
   }
 
   /**
-   * Get all 4 DORA metrics in parallel
+   * Obtiene las 4 metricas DORA optimizando llamadas a la API:
+   * - 1 fetch de deployments compartido (antes: 4 independientes)
+   * - Pre-carga paralela de statuses en lotes (antes: N+1 secuencial)
+   * - Cache TTL evita re-fetch en llamadas repetidas al dashboard
    */
   async getAllMetrics(days = 90) {
+    // 1. Fetch unico de deployments — resultado queda en cache
+    const deployments = await this._getDeployments(days);
+
+    // 2. Pre-carga paralela de todos los statuses antes de computar metricas.
+    //    getChangeFailureRate y getMTTR los leen del cache sin HTTP adicional.
+    await this._prefetchStatuses(deployments);
+
+    // 3. Computo paralelo de las 4 metricas (deployments y statuses ya en cache)
     const [deploymentFrequency, leadTime, changeFailureRate, mttr] = await Promise.all([
       this.getDeploymentFrequency(days),
       this.getLeadTimeForChanges(days),

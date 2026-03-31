@@ -69,42 +69,20 @@ router.get('/products/search', validateSearchQuery, function(req, res, next) {
 });
 
 router.all('/products/buy', validatePurchase, function(req, res, next) {
-    let params = null;
-    if (req.method === "GET") {
-        params = url.parse(req.url, true).query;
-    } else {
-        params = req.body;
-    }
+    // req.validatedBody is set by validatePurchase middleware (Zod PurchaseSchema).
+    // All fields are already validated and present — no redundant checks needed.
+    const params = req.validatedBody;
 
-    let cart = null;
-    try {
-        if (params.price === undefined) {
-            throw new Error("Missing parameter 'price'");
-        }
-        cart = {
-            mail: params.mail,
-            address: params.address,
-            ship_date: params.ship_date,
-            phone: params.phone,
-            product_id: params.product_id,
-            product_name: params.product_name,
-            username: req.session.user_name,
-            price: params.price.substr(0, params.price.length - 1)
-        };
-
-        const re = /^([a-zA-Z0-9])(([\-.]|[_]+)?([a-zA-Z0-9]+))*(@){1}[a-z0-9]+[.]{1}(([a-z]{2,3})|([a-z]{2,3}[.]{1}[a-z]{2,3}))$/;
-        if (!re.test(cart.mail)) {
-            throw new Error("Invalid mail format");
-        }
-
-        for (const prop in cart) {
-            if (cart[prop] === undefined) {
-                throw new Error("Missing parameter '" + prop + "'");
-            }
-        }
-    } catch (err) {
-        return res.status(400).json({ message: err.message });
-    }
+    const cart = {
+        mail: params.mail,
+        address: params.address,
+        ship_date: params.ship_date,
+        phone: params.phone,
+        product_id: params.product_id,
+        product_name: params.product_name,
+        username: req.session.user_name,
+        price: params.price.slice(0, -1)
+    };
 
     db_products.purchase(cart)
         .then(function () {
