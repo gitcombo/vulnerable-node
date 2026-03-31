@@ -10,11 +10,16 @@
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=tests/unit",
     "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=tests/integration",
     "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=tests/e2e",
-    "test:ci": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=tests/unit --coverage --coverageReporters=lcov --coverageReporters=text-summary --forceExit"
+    "test:ci": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=tests/unit --coverage --coverageReporters=lcov --coverageReporters=text-summary --forceExit",
+    "prepare": "husky",
+    "sbom": "syft scan . -o cyclonedx-json=sbom.json",
+    "audit:check": "npm audit --audit-level=high",
+    "scan:secrets": "secretlint \"**/*\""
   },
   "dependencies": {
+    "argon2": "^0.41.1",
+    "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.7",
-    "csurf": "^1.11.0",
     "debug": "^4.4.0",
     "dotenv": "^16.4.7",
     "ejs": "^3.1.10",
@@ -22,17 +27,18 @@
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "express-session": "^1.18.1",
-    "connect-pg-simple": "^10.0.0",
     "helmet": "^8.0.0",
     "morgan": "^1.10.0",
-    "argon2": "^0.41.1",
     "pg-promise": "^11.10.2",
     "uuid": "^11.0.5",
     "winston": "^3.17.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@secretlint/secretlint-rule-preset-recommend": "^11.3.1",
+    "husky": "^9.1.7",
     "jest": "^29.7.0",
+    "secretlint": "^11.3.1",
     "supertest": "^7.0.0"
   }
 }

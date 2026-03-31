@@ -60,6 +60,61 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/vulnerablenode
           SESSION_SECRET: ci-test-secret-key
 
+  sbom-and-scan:
+    name: SBOM Generation & Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      # ── SBOM generation ──────────────────────────────────────────────────────
+      - name: Generate SBOM with Syft (CycloneDX JSON)
+        uses: anchore/syft-action@v2
+        with:
+          path: "."
+          format: "cyclonedx-json"
+          output-file: "sbom-ci.json"
+          artifact-name: "sbom"
+
+      # ── Vulnerability scan: Grype (Anchore) ──────────────────────────────────
+      - name: Scan dependencies with Grype
+        uses: anchore/scan-action@v6
+        id: grype-scan
+        with:
+          path: "."
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      # ── Vulnerability scan: Trivy (Aqua Security) ───────────────────────────
+      - name: Scan filesystem with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # ── npm audit gate ────────────────────────────────────────────────────────
+      - name: npm audit (HIGH/CRITICAL gate)
+        run: npm run audit:check
+
+      # ── Upload evidence artifacts ─────────────────────────────────────────────
+      - name: Upload vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: reports/vulnerability/
+          retention-days: 30
+
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest

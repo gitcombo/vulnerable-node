@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import csrf from 'csurf';
+import crypto from 'crypto';
 import config from './config.js';
 import requestId from './src/interface/http/middleware/requestId.js';
 import { apiLimiter, loginLimiter } from './src/interface/http/middleware/rateLimiter.js';
@@ -65,13 +65,23 @@ app.use(session({
   name: 'sessionId'
 }));
 
-// CSRF protection
-const csrfProtection = csrf({ cookie: false }); // Use session-based CSRF (not cookie)
-app.use(csrfProtection);
-
-// Make CSRF token available to all templates
+// CSRF protection (synchronizer token pattern, session-based — replaces deprecated csurf)
 app.use(function(req, res, next) {
-  res.locals.csrfToken = req.csrfToken();
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = crypto.randomBytes(32).toString('hex');
+  }
+  req.csrfToken = () => req.session.csrfToken;
+  res.locals.csrfToken = req.session.csrfToken;
+
+  const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
+  if (!safeMethods.includes(req.method)) {
+    const submitted = req.body?._csrf || req.headers['x-csrf-token'];
+    if (submitted !== req.session.csrfToken) {
+      const err = new Error('Invalid CSRF token');
+      err.code = 'EBADCSRFTOKEN';
+      return next(err);
+    }
+  }
   next();
 });
 
