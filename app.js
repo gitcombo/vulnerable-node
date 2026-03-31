@@ -75,6 +75,11 @@ app.use(function(req, res, next) {
 
   const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
   if (!safeMethods.includes(req.method)) {
+    // Unauthenticated requests bypass CSRF — they will be redirected to /login
+    // by the route auth guard. CSRF attacks require an authenticated session.
+    if (!req.session.logged) {
+      return next();
+    }
     const submitted = req.body?._csrf || req.headers['x-csrf-token'];
     if (submitted !== req.session.csrfToken) {
       const err = new Error('Invalid CSRF token');
