@@ -30,7 +30,7 @@ Full rehabilitation of the vulnerable-node project from an intentionally vulnera
 | #012 | Infrastructure Modernization | 🟠 ALTA | A06 - Vulnerable Components | ✅ RESUELTO |
 | #013 | Redirect Loop por Orden de Routers | 🔴 CRITICA | Configuration / Routing | ✅ RESUELTO |
 | #014 | Columna Password Incompatible con Argon2 | 🔴 CRITICA | Configuration / Database Schema | ✅ RESUELTO |
-| #015 | Hashing Secuencial en init_db — Paralelizacion con Promise.all | 🟡 MEDIA | inOps — Cloud Economics & Performance | ✅ RESUELTO |
+| #015 | Hashing Secuencial en init_db — Paralelizacion con Promise.all | 🟡 MEDIA | FinOps — Cloud Economics & Performance | ✅ RESUELTO |
 
 ---
 
