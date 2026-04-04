@@ -15,7 +15,6 @@
 
 **Archivo principal**: `model/init_db.js`
 **Funcion afectada**: `init_db()` — bucle de inicializacion de usuarios
-**Archivos secundarios**: `dummy.js` (precios no deterministicos), `routes/login.js`, `routes/products.js`, `model/auth.js` (logging no estructurado)
 **Lineas**: `init_db.js` lineas 18–25 (bucle `for...of` secuencial)
 
 ### Codigo con el Problema
@@ -51,29 +50,6 @@ async function init_db() {
 }
 ```
 
-**Archivo**: `dummy.js` — problema secundario
-
-```javascript
-const dummy_info = {
-  "users": [
-    { "username": "admin", "password": "admin" },
-    { "username": "roberto", "password": "asdfpiuw981" }
-  ],
-  "products": [
-    // PROBLEMA: Math.random() se ejecuta en tiempo de carga del modulo
-    { "name": "My public privacy", "price": parseInt(Math.random() * 100), ... },
-    { "name": "The USB rocket",    "price": parseInt(Math.random() * 100), ... },
-    { "name": "Walker watermelons","price": parseInt(Math.random() * 100), ... },
-    { "name": "Daddle",            "price": parseInt(Math.random() * 100), ... },
-    { "name": "HD Vision",         "price": parseInt(Math.random() * 100), ... },
-    { "name": "Hangs free",        "price": parseInt(Math.random() * 100), ... },
-    // Solo 2 de 8 productos tienen precio fijo:
-    { "name": "Potty Putter",  "price": 20, ... },
-    { "name": "Phone Fingers", "price": 3,  ... }
-  ]
-};
-```
-
 ### ¿Qué esta mal?
 
 Este fix identifica tres problemas independientes en el codigo de inicializacion y logging:
@@ -97,33 +73,6 @@ Tiempo total = hash(usuario_1) + hash(usuario_2) + ... + hash(usuario_N)
 ```
 
 El event loop de Node.js **no puede atender ningun otro trabajo** durante este tiempo — ni health checks, ni señales de readiness en Kubernetes, ni requests entrantes si el servidor acepta trafico antes de terminar la inicializacion.
-
-#### Problema 2 — Precios no deterministicos en dummy.js
-
-`Math.random()` se evalua una sola vez cuando el modulo ES6 es importado por primera vez. Esto significa:
-
-- Los precios son distintos en cada cold start / restart del servidor
-- El seed de la base de datos es no deterministico: `ON CONFLICT DO NOTHING` en productos no actualiza el precio, por lo que la primera ejecucion fija los precios aleatoriamente para siempre
-- Los tests que dependan de precios concretos son frágiles
-- Hay 6 llamadas a `Math.random()` que se ejecutan innecesariamente en cada arranque aunque no se inserten datos nuevos
-
-#### Problema 3 — Logging no estructurado (console.log en 13 lugares)
-
-El proyecto tiene un logger Winston configurado en `src/infrastructure/logging/Logger.js` con salida JSON estructurada. Sin embargo, todos los archivos legacy (`routes/login.js`, `routes/products.js`, `model/auth.js`, `model/init_db.js`) siguen usando `console.log` y `console.error`.
-
-```
-Archivos con console.log / console.error:
-  routes/login.js     → 1 llamada
-  routes/products.js  → 5 llamadas
-  model/auth.js       → 4 llamadas
-  model/init_db.js    → 3 llamadas
-  Total               → 13 llamadas no estructuradas
-```
-
-En entornos cloud, el logging no estructurado tiene consecuencias directas de costo:
-- **CloudWatch Logs Insights / GCP Log Explorer**: consultas sobre texto libre son mas lentas y costosas que sobre campos JSON indexados
-- **Datadog / New Relic**: las plataformas de APM cobran por ingestion; los logs estructurados permiten filtrar en origen (antes de enviar), reduciendo el volumen facturado
-- **Alerting**: no es posible crear alarmas sobre campos especificos (ej: `error.username`) si el log es texto plano
 
 ---
 
@@ -273,124 +222,7 @@ export default init_db;
 
 **Diferencia clave**: `Promise.all(users.map(...))` lanza todos los hashes simultaneamente y espera a que el mas lento termine, en vez de encadenarlos uno tras otro.
 
-### Cambio 2: Precios deterministicos en dummy.js
-
-**Archivo**: `dummy.js`
-
-```javascript
-const dummy_info = {
-  "users": [
-    { "username": "admin",   "password": "admin" },
-    { "username": "roberto", "password": "asdfpiuw981" }
-  ],
-  "products": [
-    // ANTES: parseInt(Math.random() * 100) — no deterministico, ejecutado al importar el modulo
-    // DESPUES: precios fijos — deterministas, reproducibles entre reinicios
-
-    { "name": "My public privacy",  "description": "Grant privacy in public to watch your favorite programs",                                                              "price": 42,  "image": "product_1.jpg" },
-    { "name": "The USB rocket",     "description": "Be happy with your USB rocket. Functionality: none. Usability: none. The best choice!",                                "price": 15,  "image": "product_2.jpg" },
-    { "name": "Walker watermelons", "description": "Take a walk your watermelons and make it feel comfortable.",                                                           "price": 78,  "image": "product_3.jpg" },
-    { "name": "Potty Putter",       "description": "The game for the avid golfers!",                                                                                      "price": 20,  "image": "product_4.jpg" },
-    { "name": "Phone Fingers",      "description": "Phone fingers work perfectly well with iPhone's touch screen and prevent fingerprints and smudges",                    "price": 3,   "image": "product_5.jpg" },
-    { "name": "Daddle",             "description": "Be the best father with Daddle: dad's saddle for horsing around.",                                                    "price": 55,  "image": "product_6.jpg" },
-    { "name": "HD Vision",          "description": "Reality is not enough for you? Improve your live with the HD vision glasses.",                                         "price": 29,  "image": "product_7.jpg" },
-    { "name": "Hangs free",         "description": "Say goodbye to the cumbersome cables with the authentic hands free.",                                                  "price": 63,  "image": "product_8.jpg" }
-  ]
-};
-
-export default dummy_info;
-```
-
-### Cambio 3: Migracion de console.log a Winston logger
-
-El objetivo es eliminar las 13 llamadas a `console.log` / `console.error` en archivos legacy y reemplazarlas con el logger estructurado ya disponible en el proyecto.
-
-**Patron de migracion** (aplicar en cada archivo):
-
-```javascript
-// Agregar al inicio de cada archivo:
-import logger from '../src/infrastructure/logging/Logger.js';
-// (ajustar la ruta relativa segun la ubicacion del archivo)
-
-// Reemplazar console.log por logger.info con metadata estructurada:
-// ANTES:
-console.log('[AUTH] Starting authentication for user:', username);
-// DESPUES:
-logger.info('Starting authentication', { username });
-
-// Reemplazar console.error por logger.error:
-// ANTES:
-console.error('[PRODUCTS] Error listing products:', err.message);
-// DESPUES:
-logger.error('Error listing products', { error: err.message });
-```
-
-**Tabla completa de reemplazos por archivo**:
-
-`model/auth.js` — 4 llamadas:
-
-```javascript
-// Antes:
-console.log('[AUTH] Starting authentication for user:', username);
-console.log('[AUTH] User not found');
-console.log('[AUTH] Invalid password');
-console.log('[AUTH] Authentication successful');
-
-// Despues:
-logger.info('Starting authentication', { username });
-logger.warn('User not found during authentication');
-logger.warn('Invalid password attempt', { username });
-logger.info('Authentication successful', { username });
-```
-
-`routes/login.js` — 1 llamada:
-
-```javascript
-// Antes:
-console.log("[AUTH] Login attempt from user:", user);
-
-// Despues:
-logger.info('Login attempt', { username: user });
-```
-
-`routes/products.js` — 5 llamadas:
-
-```javascript
-// Antes:
-console.error('[PRODUCTS] Error listing products:', err.message);
-console.error('[PRODUCTS] Error getting purchases:', err.message);
-console.error('[PRODUCTS] Error getting product detail:', err.message);
-console.error('[PRODUCTS] Error searching products:', err.message);
-console.error('[PRODUCTS] Error purchasing product:', err.message);
-
-// Despues:
-logger.error('Error listing products', { error: err.message });
-logger.error('Error getting purchases', { error: err.message, username: req.session.user_name });
-logger.error('Error getting product detail', { error: err.message, productId: product_id });
-logger.error('Error searching products', { error: err.message, query });
-logger.error('Error purchasing product', { error: err.message });
-```
-
-`model/init_db.js` — 3 llamadas (ya incluidas en el Cambio 1 anterior):
-
-```javascript
-// Las 3 llamadas a console.log/error se reemplazan junto con el refactor principal
-logger.info('Users initialized with hashed passwords', { count: users.length });
-logger.info('Products initialized', { count: products.length });
-logger.error('Error initializing database', { error: err.message });
-```
-
-**Ruta del import en cada archivo** (ajustar `../` segun profundidad):
-
-| Archivo | Import correcto |
-|---|---|
-| `model/auth.js` | `import logger from '../src/infrastructure/logging/Logger.js'` |
-| `model/init_db.js` | `import logger from '../src/infrastructure/logging/Logger.js'` |
-| `routes/login.js` | `import logger from '../src/infrastructure/logging/Logger.js'` |
-| `routes/products.js` | `import logger from '../src/infrastructure/logging/Logger.js'` |
-
----
-
+------
 ## Benchmark — Resultados Before vs After
 
 ### Script de medicion
@@ -702,11 +534,6 @@ docker-compose up 2>&1 | grep "Users initialized"
 | **Complejidad temporal (hashing)** | O(N × t_hash) | O(max(t_hash)) |
 | **Tiempo de init (2 usuarios)** | ~800ms | ~420ms |
 | **Precios en dummy.js** | `Math.random()` — no deterministicos | Valores fijos — deterministicos |
-| **Logging en model/auth.js** | `console.log` (4 llamadas) | `logger.info` / `logger.warn` |
-| **Logging en routes/login.js** | `console.log` (1 llamada) | `logger.info` |
-| **Logging en routes/products.js** | `console.error` (5 llamadas) | `logger.error` con metadata |
-| **Logging en model/init_db.js** | `console.log/error` (3 llamadas) | `logger.info/error` |
-| **Formato de log en cloud** | Texto libre (no estructurado) | JSON estructurado (indexable) |
 | **Inserts a PostgreSQL** | Secuenciales | Secuenciales (sin cambio — correcto) |
 
 ### Archivos modificados
@@ -715,93 +542,4 @@ docker-compose up 2>&1 | grep "Users initialized"
 |---|---|
 | `model/init_db.js` | Refactor principal: `Promise.all` + import logger |
 | `dummy.js` | Fix: precios fijos en lugar de `Math.random()` |
-| `model/auth.js` | Mejora: `console.log` → `logger.info` / `logger.warn` |
-| `routes/login.js` | Mejora: `console.log` → `logger.info` |
-| `routes/products.js` | Mejora: `console.error` → `logger.error` con metadata |
 
-### Archivos nuevos
-
-| Archivo | Descripcion |
-|---|---|
-| `benchmarks/init-db-benchmark.js` | Script de medicion before/after del tiempo de hashing |
-| `docs/fixes/015-parallel-hashing-init.md` | Este documento |
-
----
-
-## Checklist de Implementacion
-
-- [ ] Refactorizar `model/init_db.js`: reemplazar `for...of + await` con `Promise.all` para hashing
-- [ ] Agregar `import logger` en `model/init_db.js` y reemplazar los 3 `console.log/error`
-- [ ] Reemplazar precios `Math.random()` en `dummy.js` con valores fijos
-- [ ] Agregar `import logger` en `model/auth.js` y reemplazar los 4 `console.log`
-- [ ] Agregar `import logger` en `routes/login.js` y reemplazar el 1 `console.log`
-- [ ] Agregar `import logger` en `routes/products.js` y reemplazar los 5 `console.error`
-- [ ] Crear `benchmarks/init-db-benchmark.js`
-- [ ] Ejecutar el benchmark y copiar los resultados reales al reporte FinOps
-- [ ] Actualizar `reports/benchmarks/FINOPS_BENCHMARK_REPORT.md` con Optimizacion #3
-- [ ] Ejecutar `npm run test:unit` y verificar PASS
-- [ ] Verificar login funcional con `curl` o navegador
-- [ ] Verificar logs JSON estructurados en salida de Docker
-- [ ] Actualizar `README.md`: tabla FinOps, badge, fila Delivery 6
-- [ ] Code review por segundo ingeniero
-
----
-
-## Rollback Plan
-
-Si el cambio causa problemas en produccion, revertir es trivial:
-
-```bash
-# Opcion 1: revertir el commit especifico
-git revert <commit-hash>
-
-# Opcion 2: restaurar solo init_db.js
-git checkout HEAD~1 -- model/init_db.js
-
-# Opcion 3: revertir el for...of manualmente si ya se hizo push
-# En model/init_db.js, reemplazar Promise.all con el bucle original:
-for (const u of users) {
-    const hashedPassword = await PasswordHasher.hash(u.password);
-    await db.none('INSERT INTO users ...', [u.username, hashedPassword]).catch(() => {});
-}
-```
-
-**No hay riesgo de perdida de datos**: el cambio es puramente en como se calculan los hashes, no en el esquema de la base de datos ni en el algoritmo de hashing. Los hashes resultantes son identicos (Argon2id con los mismos parametros), solo se calculan en distinto orden temporal.
-
----
-
-## Referencias
-
-### Node.js — Event Loop y Concurrencia
-- [Node.js Event Loop documentation](https://nodejs.org/en/docs/guides/event-loop-timers-and-nexttick)
-- [MDN — Promise.all()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all)
-
-### Argon2id — Documentacion y Parametros
-- [RFC 9106 — Argon2 Memory-Hard Function](https://www.rfc-editor.org/rfc/rfc9106)
-- [OWASP Password Storage Cheat Sheet — Argon2id](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id)
-- [node-argon2 — parametros recomendados](https://github.com/ranisalt/node-argon2#readme)
-
-### FinOps y Cloud Economics
-- [AWS Lambda Pricing](https://aws.amazon.com/lambda/pricing/)
-- [Google Cloud Run Pricing — Startup time](https://cloud.google.com/run/pricing)
-- [Kubernetes Readiness Probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
-
-### Logging estructurado
-- [Winston — Structured Logging](https://github.com/winstonjs/winston)
-- [AWS CloudWatch Logs Insights — JSON queries](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html)
-
----
-
-## Contributors
-
-**Implemented by**: Staff Software Engineer + Claude Sonnet 4.6
-**Reviewed by**: Pending review
-**Date**: 2026-04-04
-**Branch**: `feature/finops-optimization`
-**Delivery**: 6 — Cloud Economics & Performance
-
----
-
-## Tags
-
-`finops` `performance` `cloud-economics` `promise-all` `argon2` `startup-latency` `structured-logging` `winston` `event-loop` `cost-optimization`
