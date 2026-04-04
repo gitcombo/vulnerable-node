@@ -225,6 +225,19 @@ export default init_db;
 ------
 ## Benchmark — Resultados Before vs After
 
+### BEFORE FIX
+<img width="1206" height="127" alt="before fix" src="https://github.com/user-attachments/assets/343368f5-6345-4d0c-a5f7-ed4524ae7b9d" />
+
+### AFTER FIX
+<img width="1200" height="147" alt="after fix" src="https://github.com/user-attachments/assets/774c1d9e-d0fb-48d1-9a98-20f726c85b32" />
+
+##BENCHMARK
+Before fix init db time: 388ms
+After  fix init db time: 311ms
+Total reduction db time: 77ms (19.85%)
+
+----
+
 ### Script de medicion
 
 **Archivo**: `benchmarks/init-db-benchmark.js` (nuevo, creado en este fix)
@@ -332,38 +345,6 @@ Con el patron secuencial, agregar un solo usuario al seed cuesta 400ms adicional
 
 ---
 
-## Razonamiento: por que los inserts se mantienen secuenciales
-
-Es importante documentar por que **no** se paraleliza el INSERT a la base de datos, solo el hashing.
-
-```javascript
-// CORRECTO — hashing en paralelo, inserts en serie:
-const hashedUsers = await Promise.all(
-    users.map(u => PasswordHasher.hash(u.password).then(hash => ({ username: u.username, hash })))
-);
-for (const { username, hash } of hashedUsers) {
-    await db.none('INSERT INTO users ...', [username, hash]);
-}
-
-// INCORRECTO — no hacer esto:
-await Promise.all(
-    users.map(async u => {
-        const hash = await PasswordHasher.hash(u.password);
-        await db.none('INSERT INTO users ...', [u.username, hash]); // error potencial
-    })
-);
-```
-
-`pg-promise` configura un pool de conexiones (por defecto: 10 conexiones). Cada conexion puede tener **una sola query activa** en un momento dado. Con `Promise.all` sobre los inserts:
-
-1. Si el pool tiene suficientes conexiones disponibles, los inserts van a diferentes conexiones — funcionaria, pero introduce competencia no controlada por los recursos del pool
-2. Si el pool esta en uso (otros requests simultaneos durante el startup), los inserts extras esperan en cola — sin ganancia real
-3. Con 2 usuarios, la diferencia entre serializar o paralelizar los inserts es ~2ms — irrelevante
-
-El hashing, en cambio, es pura CPU sin dependencias externas: puede ejecutarse en paralelo sin ninguno de estos problemas.
-
----
-
 ## Impacto en Cloud Economics
 
 ### Modelo de costo: AWS Lambda
@@ -427,100 +408,6 @@ DESPUES (420ms de init hashing):
   - El endpoint /health puede responder durante la segunda mitad del startup
   - Rollouts mas predecibles, menos timeouts de readiness en deploys bajo carga
 ```
-
----
-
-## Validacion y Testing
-
-### Tests unitarios existentes (no requieren modificacion)
-
-Los tests de `PasswordHasher` en `tests/unit/passwordHasher.test.js` ya cubren el comportamiento del hashing. La migracion a `Promise.all` no cambia que se llame a `PasswordHasher.hash()` — solo cambia el orden en que se invocan las llamadas.
-
-```bash
-npm run test:unit
-# Resultado esperado: PASS (sin cambios en los tests existentes)
-```
-
-### Tests de regresion manuales
-
-**1. Verificar que los usuarios se crean correctamente al arrancar**
-
-```bash
-docker-compose up --build
-docker exec postgres_db psql -U postgres -d vulnerablenode \
-  -c "SELECT name, LEFT(password, 30) || '...' AS hash_preview FROM users;"
-
-# Resultado esperado:
-#  name    | hash_preview
-# ---------+--------------------------------
-#  admin   | $argon2id$v=19$m=65536,t=3...
-#  roberto | $argon2id$v=19$m=65536,t=3...
-# (2 rows) - ambos usuarios con hashes Argon2id validos
-```
-
-**2. Verificar que el login sigue funcionando despues del cambio**
-
-```bash
-# Login con credenciales validas
-curl -X POST http://localhost:3000/login/auth \
-  -d "username=admin&password=admin&_csrf=TOKEN" \
-  -c cookies.txt -L -v
-
-# Resultado esperado: HTTP 302 redirect a / (productos)
-```
-
-**3. Verificar que los precios de productos son deterministicos entre reinicios**
-
-```bash
-# Arranque 1
-docker-compose up --build
-docker exec postgres_db psql -U postgres -d vulnerablenode \
-  -c "SELECT name, price FROM products ORDER BY id;" > precios_arranque_1.txt
-
-# Destruir y recrear contenedores
-docker-compose down -v
-docker-compose up --build
-docker exec postgres_db psql -U postgres -d vulnerablenode \
-  -c "SELECT name, price FROM products ORDER BY id;" > precios_arranque_2.txt
-
-diff precios_arranque_1.txt precios_arranque_2.txt
-# Resultado esperado: sin diferencias (0 lineas de diff)
-```
-
-**4. Ejecutar el benchmark y registrar los resultados**
-
-```bash
-node benchmarks/init-db-benchmark.js
-
-# Resultado esperado (ejemplo):
-# | Metrica              | Antes (secuencial) | Despues (paralelo) | Mejora        |
-# |---------------------|-------------------|-------------------|---------------|
-# | Tiempo total (med.) |        798ms      |        412ms      | 48.4% mas rapido |
-```
-
-**5. Verificar que los logs tienen formato JSON estructurado**
-
-```bash
-docker-compose up 2>&1 | grep "Users initialized"
-
-# ANTES (console.log):
-# [INIT_DB] Users initialized with hashed passwords
-
-# DESPUES (Winston JSON):
-# {"level":"info","message":"Users initialized with hashed passwords","count":2,"service":"vulnerable-node","timestamp":"2026-04-04T..."}
-```
-
-### Tabla de resultados esperados
-
-| Test | Estado esperado | Que valida |
-|---|---|---|
-| `npm run test:unit` | ✅ PASS | PasswordHasher no se rompio |
-| Login admin/admin | ✅ 302 redirect | Hashes paralelos son validos |
-| Login roberto/asdfpiuw981 | ✅ 302 redirect | Segundo usuario hashea correctamente |
-| Login credenciales incorrectas | ✅ "Invalid credentials" | No hay regresion en auth |
-| Precios deterministicos entre reinicios | ✅ diff vacio | dummy.js sin Math.random() |
-| Logs en JSON | ✅ campo `message` estructurado | Winston reemplaza console.log |
-| Benchmark | ✅ >30% mejora | Promise.all es mas rapido que for...of |
 
 ---
 
