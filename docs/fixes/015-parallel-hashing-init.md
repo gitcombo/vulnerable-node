@@ -231,10 +231,10 @@ export default init_db;
 ### AFTER FIX
 <img width="1200" height="147" alt="after fix" src="https://github.com/user-attachments/assets/774c1d9e-d0fb-48d1-9a98-20f726c85b32" />
 
-##BENCHMARK
-Before fix init db time: 388ms
-After  fix init db time: 311ms
-Total reduction db time: 77ms (19.85%)
+### BENCHMARK
+Before fix init db time: 388ms.
+After  fix init db time: 311ms.
+Total reduction db time: 77ms (19.85%).
 
 ----
 
