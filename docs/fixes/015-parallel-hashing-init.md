@@ -74,7 +74,7 @@ const dummy_info = {
 };
 ```
 
-### Que esta mal?
+### ¿Qué esta mal?
 
 Este fix identifica tres problemas independientes en el codigo de inicializacion y logging:
 
