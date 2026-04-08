@@ -30,6 +30,7 @@ Full rehabilitation of the vulnerable-node project from an intentionally vulnera
 | #012 | Infrastructure Modernization | 🟠 ALTA | A06 - Vulnerable Components | ✅ RESUELTO |
 | #013 | Redirect Loop por Orden de Routers | 🔴 CRITICA | Configuration / Routing | ✅ RESUELTO |
 | #014 | Columna Password Incompatible con Argon2 | 🔴 CRITICA | Configuration / Database Schema | ✅ RESUELTO |
+| #015 | Hashing Secuencial en init_db — Paralelizacion con Promise.all | 🟡 MEDIA | FinOps — Cloud Economics & Performance | ✅ RESUELTO |
 
 ---
 
@@ -104,6 +105,11 @@ Full rehabilitation of the vulnerable-node project from an intentionally vulnera
 - Argon2id hashes require ~97 characters; `CREATE TABLE IF NOT EXISTS` did not alter existing schema
 - Fixed by `ALTER TABLE users ALTER COLUMN password TYPE VARCHAR(255)` and re-hashing passwords
 - Silent `.catch(() => {})` in `init_db.js` masked the insertion error
+
+**Fix #015 — Hashing Secuencial en init_db** ([015-parallel-hashing-init.md[(015-parallel-hashing-init.md))
+- model/init_db.js — bucle secuencial reemplazado por Promise.all + timer de medicion
+- dummy.js — 5 usuarios nuevos agregados (total: 6) para amplificar la diferencia medible
+  
 
 ---
 

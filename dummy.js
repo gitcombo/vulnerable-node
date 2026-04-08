@@ -1,6 +1,10 @@
 const dummy_info = {
   "users": [
     { "username": "admin", "password": "admin" },
+    { "username": "andremor", "password": "asdasd#$$^sdasd1444asdad" },
+    { "username": "estuardope", "password": "dfg@#$dgdfgdfggd12" },
+    { "username": "rodrigoab", "password": "df44sdfsdqz" },
+    { "username": "stefannie2", "password": "Ste##df44sdfsdqz" },
     { "username": "roberto", "password": "asdfpiuw981" }
   ],
   "products": [
